@@ -1,243 +1,249 @@
+```python
 """
-agents/graph.py
+ui/app.py
 
-Multi-agent research pipeline using LangGraph.
-
-Agents:
-  1. Planner      — breaks the user query into sub-tasks
-  2. Researcher   — searches arXiv + web for relevant papers/info
-  3. Reader       — queries the RAG pipeline for ingested PDF context
-  4. Synthesizer  — writes the final structured answer
-
-State flows:  Planner → Researcher → Reader → Synthesizer → END
+Streamlit frontend for the ArXiv Multi-Agent Research Assistant.
+Runs LangGraph directly without FastAPI.
 """
 
-import os
-from typing import TypedDict, List, Optional, Annotated
-import operator
-
-from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph import StateGraph, END
-from dotenv import load_dotenv
-
-from tools.search_tools import arxiv_search, format_arxiv_results, web_search, format_web_results
-from rag.pipeline import RAGPipeline
-
-load_dotenv()
-
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
-
-# Shared LLM instance (Groq is fast enough for all agents)
-llm = ChatGroq(model=GROQ_MODEL, temperature=0.2, streaming=True)
-
-# Shared RAG pipeline
-rag = RAGPipeline()
-
+import time
+import streamlit as st
+from agents.graph import run_research
 
 # ------------------------------------------------------------------
-# State schema
+# Page config
 # ------------------------------------------------------------------
 
-class ResearchState(TypedDict):
-    query: str                        # original user question
-    sub_tasks: List[str]              # Planner output
-    arxiv_results: str                # Researcher output
-    web_results: str                  # Researcher output
-    rag_context: str                  # Reader output
-    final_answer: str                 # Synthesizer output
-    current_agent: str                # for UI streaming
-    messages: Annotated[List, operator.add]   # full message log
-
+st.set_page_config(
+    page_title="ArXiv Research Assistant",
+    page_icon="🔬",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 # ------------------------------------------------------------------
-# Agent 1 — Planner
+# Custom CSS
 # ------------------------------------------------------------------
 
-def planner_agent(state: ResearchState) -> dict:
-    """Decompose the user query into focused research sub-tasks."""
-    print("[Planner] Running...")
+st.markdown("""
+<style>
+.agent-card {
+    padding: 10px 16px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    font-size: 14px;
+    border: 1px solid #e0e0e0;
+}
 
-    prompt = f"""You are a research planning assistant.
-Break the following research question into 2-4 specific, focused sub-tasks
-that together will produce a comprehensive answer.
+.agent-active {
+    background: #e8f4fd;
+    border-color: #1976d2;
+    color: #1976d2;
+}
 
-Research question: {state['query']}
+.agent-done {
+    background: #e8f5e9;
+    border-color: #388e3c;
+    color: #388e3c;
+}
 
-Respond as a numbered list only. Each sub-task should be one clear sentence.
-Example format:
-1. Find recent papers on X
-2. Look up definitions and background for Y
-3. Identify key algorithms used in Z"""
+.agent-waiting {
+    background: #f5f5f5;
+    border-color: #bdbdbd;
+    color: #9e9e9e;
+}
 
-    response = llm.invoke([HumanMessage(content=prompt)])
-    sub_tasks_text = response.content
+.paper-card {
+    padding: 12px 16px;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+    margin-bottom: 10px;
+    background: #fafafa;
+}
 
-    # Parse numbered list
-    sub_tasks = []
-    for line in sub_tasks_text.strip().split("\n"):
-        line = line.strip()
-        if line and line[0].isdigit():
-            task = line.split(".", 1)[-1].strip()
-            if task:
-                sub_tasks.append(task)
-
-    return {
-        "sub_tasks": sub_tasks,
-        "current_agent": "planner",
-        "messages": [{"role": "planner", "content": sub_tasks_text}],
-    }
-
+.metric-box {
+    background: #f0f4ff;
+    border-radius: 8px;
+    padding: 12px;
+    text-align: center;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# Agent 2 — Researcher
+# Sidebar
 # ------------------------------------------------------------------
 
-def researcher_agent(state: ResearchState) -> dict:
-    """Search arXiv and web based on the planner's sub-tasks."""
-    print("[Researcher] Running...")
+with st.sidebar:
+    st.title("🔬 Research Assistant")
+    st.caption("Multi-agent • LangGraph • Groq • RAG")
 
-    # Build a focused search query from sub-tasks
-    tasks_str = "\n".join(state["sub_tasks"])
-    query_prompt = f"""Given these research sub-tasks:
-{tasks_str}
+    st.divider()
 
-Write ONE concise arXiv search query (max 10 words) that covers the main topic."""
+    st.subheader("📚 Knowledge Base")
+    st.success("✅ Research engine ready")
+    st.info("Running directly inside Streamlit")
 
-    query_response = llm.invoke([HumanMessage(content=query_prompt)])
-    search_query = query_response.content.strip().strip('"')
+    st.divider()
 
-    # Search arXiv (download top 2 PDFs for RAG ingestion)
-    arxiv_papers = arxiv_search(
-        query=search_query,
-        max_results=5,
-        download_pdfs=True,
+    st.subheader("📄 Upload Paper PDF")
+
+    st.file_uploader(
+        "PDF upload coming soon",
+        type=["pdf"],
+        disabled=True
     )
-    arxiv_str = format_arxiv_results(arxiv_papers)
 
-    # Auto-ingest any newly downloaded PDFs into RAG
-    newly_ingested = rag.ingest_directory("data/docs")
-    if newly_ingested:
-        print(f"[Researcher] Auto-ingested {newly_ingested} new chunks into RAG")
+    st.divider()
 
-    # Web search for additional context
-    web_results = web_search(query=search_query, max_results=4)
-    web_str = format_web_results(web_results)
-
-    return {
-        "arxiv_results": arxiv_str,
-        "web_results": web_str,
-        "current_agent": "researcher",
-        "messages": [{"role": "researcher", "content": f"arXiv:\n{arxiv_str}\n\nWeb:\n{web_str}"}],
-    }
-
-
-# ------------------------------------------------------------------
-# Agent 3 — Reader (RAG)
-# ------------------------------------------------------------------
-
-def reader_agent(state: ResearchState) -> dict:
-    """Query the FAISS RAG index for context from ingested PDFs."""
-    print("[Reader] Running...")
-
-    context = rag.get_context_string(state["query"], top_k=5)
-
-    return {
-        "rag_context": context,
-        "current_agent": "reader",
-        "messages": [{"role": "reader", "content": context}],
-    }
-
-
-# ------------------------------------------------------------------
-# Agent 4 — Synthesizer
-# ------------------------------------------------------------------
-
-def synthesizer_agent(state: ResearchState) -> dict:
-    """Combine all gathered information into a structured final answer."""
-    print("[Synthesizer] Running...")
-
-    sub_tasks_str = "\n".join(f"- {t}" for t in state["sub_tasks"])
-
-    system = """You are an expert research synthesizer.
-Your job is to produce a clear, well-structured research summary.
-Always cite sources when using specific information.
-Use markdown formatting with headers, bullet points, and bold text."""
-
-    user = f"""Research question: {state['query']}
-
-Research sub-tasks addressed:
-{sub_tasks_str}
-
-== arXiv Papers Found ==
-{state['arxiv_results']}
-
-== Web Search Results ==
-{state['web_results']}
-
-== Context from Ingested PDFs (RAG) ==
-{state['rag_context']}
-
----
-
-Write a comprehensive, well-structured answer to the research question.
-Include:
-1. A brief overview (2-3 sentences)
-2. Key findings with citations
-3. Important methodologies or techniques mentioned
-4. Open questions or future directions
-5. Recommended papers to read further"""
-
-    response = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
-
-    return {
-        "final_answer": response.content,
-        "current_agent": "synthesizer",
-        "messages": [{"role": "synthesizer", "content": response.content}],
-    }
-
-
-# ------------------------------------------------------------------
-# Build the LangGraph
-# ------------------------------------------------------------------
-
-def build_graph() -> StateGraph:
-    graph = StateGraph(ResearchState)
-
-    graph.add_node("planner", planner_agent)
-    graph.add_node("researcher", researcher_agent)
-    graph.add_node("reader", reader_agent)
-    graph.add_node("synthesizer", synthesizer_agent)
-
-    # Linear pipeline: planner → researcher → reader → synthesizer → END
-    graph.set_entry_point("planner")
-    graph.add_edge("planner", "researcher")
-    graph.add_edge("researcher", "reader")
-    graph.add_edge("reader", "synthesizer")
-    graph.add_edge("synthesizer", END)
-
-    return graph.compile()
-
-
-# Compiled graph (import this in API and UI)
-research_graph = build_graph()
-
-
-# ------------------------------------------------------------------
-# Convenience runner
-# ------------------------------------------------------------------
-
-def run_research(query: str) -> ResearchState:
-    """Run the full multi-agent pipeline and return the final state."""
-    initial_state = ResearchState(
-        query=query,
-        sub_tasks=[],
-        arxiv_results="",
-        web_results="",
-        rag_context="",
-        final_answer="",
-        current_agent="",
-        messages=[],
+    st.caption(
+        "Built with LangGraph · LangChain · Groq · FAISS · Sentence Transformers"
     )
-    final_state = research_graph.invoke(initial_state)
-    return final_state
+
+# ------------------------------------------------------------------
+# Main page
+# ------------------------------------------------------------------
+
+st.title("ArXiv Multi-Agent Research Assistant")
+
+st.markdown(
+    "*Ask a research question — agents will search arXiv, scan papers, and synthesize an answer.*"
+)
+
+examples = [
+    "What are the latest techniques in retrieval-augmented generation?",
+    "How do vision transformers compare to CNNs for image classification?",
+    "Explain recent advances in reinforcement learning from human feedback (RLHF)",
+    "What is the current state of large language model alignment?",
+]
+
+with st.expander("💡 Try an example question"):
+    for ex in examples:
+        if st.button(ex, key=ex):
+            st.session_state["query_input"] = ex
+
+query = st.text_area(
+    "Your research question",
+    value=st.session_state.get("query_input", ""),
+    height=80,
+    placeholder="e.g. What are the latest techniques in retrieval-augmented generation?",
+    key="query_input",
+)
+
+run_btn = st.button(
+    "🚀 Research",
+    type="primary",
+    use_container_width=True
+)
+
+# ------------------------------------------------------------------
+# Research execution
+# ------------------------------------------------------------------
+
+if run_btn and query.strip():
+
+    st.divider()
+
+    agents = [
+        ("planner", "🗺️", "Planner", "Breaking query into sub-tasks"),
+        ("researcher", "🔍", "Researcher", "Searching arXiv"),
+        ("reader", "📖", "Reader", "Querying RAG index"),
+        ("synthesizer", "✍️", "Synthesizer", "Writing final answer"),
+    ]
+
+    col_agents, col_answer = st.columns([1, 2])
+
+    with col_agents:
+        st.subheader("Agent Pipeline")
+
+        agent_placeholders = {}
+
+        for key, icon, name, desc in agents:
+            ph = st.empty()
+
+            ph.markdown(
+                f"""
+                <div class="agent-card agent-waiting">
+                {icon} <b>{name}</b><br>
+                <span style="font-size:12px">{desc}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            agent_placeholders[key] = ph
+
+    with col_answer:
+        st.subheader("Research Answer")
+        answer_placeholder = st.empty()
+        answer_placeholder.markdown("*Waiting for agents...*")
+
+    try:
+
+        # Run LangGraph directly
+        state = run_research(query)
+
+        result = {
+            "sub_tasks": state.get("sub_tasks", []),
+            "final_answer": state.get("final_answer", ""),
+            "arxiv_results": state.get("arxiv_results", ""),
+            "rag_context_used": bool(state.get("rag_context")),
+        }
+
+        # Animate agent cards
+        for key, icon, name, desc in agents:
+
+            time.sleep(0.3)
+
+            agent_placeholders[key].markdown(
+                f"""
+                <div class="agent-card agent-done">
+                {icon} <b>{name}</b> ✓<br>
+                <span style="font-size:12px">{desc}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with col_agents:
+
+            st.subheader("Sub-tasks Planned")
+
+            for i, task in enumerate(result["sub_tasks"], start=1):
+                st.markdown(f"**{i}.** {task}")
+
+            if result["rag_context_used"]:
+                st.success("📚 RAG context contributed to the answer")
+            else:
+                st.info("ℹ️ Answer generated from live research")
+
+        answer = result["final_answer"]
+
+        displayed = ""
+
+        words = answer.split()
+
+        for i in range(0, len(words), 6):
+            displayed += " ".join(words[i:i + 6]) + " "
+            answer_placeholder.markdown(displayed + "▌")
+            time.sleep(0.04)
+
+        answer_placeholder.markdown(answer)
+
+        st.divider()
+
+        st.subheader("📄 Papers Found on arXiv")
+
+        arxiv_text = result["arxiv_results"]
+
+        if arxiv_text:
+            st.markdown(arxiv_text)
+        else:
+            st.info("No arXiv papers retrieved.")
+
+    except Exception as e:
+        st.error(f"Research failed: {e}")
+
+elif run_btn:
+    st.warning("Please enter a research question.")
+```
