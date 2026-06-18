@@ -188,7 +188,7 @@ Groq's LPU hardware delivers sub-second token generation for LLaMA 3.1 70B — f
 
 [Link to Loom demo video — add yours here]
 
-[Live deployment on HuggingFace Spaces — add yours here]
+https://huggingface.co/spaces/RoHiTpaTIL8904584164/arxiv_research_assistant
 
 ---
 
